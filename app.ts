@@ -6,6 +6,7 @@ import { axiosRequestConfig, axiosRequestConfigVeryLong } from './configs/reques
 const puppeteer = require('puppeteer')
 
 const app = express()
+app.disable('x-powered-by')
 const port = 3000
 app.use(express.json({ limit: '50mb' }))
 app.use(express.urlencoded({ limit: '50mb' }))
@@ -79,10 +80,6 @@ async function recycleIdleBrowsers() {
   }
 }
 
-setInterval(() => {
-  recycleIdleBrowsers().catch(err => logError('Recycle check failed:', err))
-}, RECYCLE_CHECK_INTERVAL)
-
 async function acquirePage(): Promise<{ page: any; entry: { browser: any; activePages: number; totalPagesServed: number } }> {
   while (browserPool.length < BROWSER_POOL_SIZE) {
     try {
@@ -94,7 +91,7 @@ async function acquirePage(): Promise<{ page: any; entry: { browser: any; active
       break
     }
   }
-  const entry = browserPool.reduce((a, b) => a.activePages <= b.activePages ? a : b)
+  const entry = browserPool.reduce((a, b) => a.activePages <= b.activePages ? a : b, browserPool[0])
   if (entry.activePages >= MAX_PAGES_PER_BROWSER) {
     throw new Error('All browser slots full')
   }
@@ -175,7 +172,7 @@ app.post('/public/v8/course/batch/cert/download/mobile', async (req, res) => {
   try {
     const svgContent = req.body.printUri
     if (req.body.outputFormat === 'svg') {
-      const _decodedSvg = decodeURIComponent(svgContent.replace(/data:image\/svg\+xml,/, '')).replace(/\<!--\s*[a-zA-Z0-9\-]*\s*--\>/g, '')
+      const _decodedSvg = decodeURIComponent(svgContent.replace(/data:image\/svg\+xml,/, '')).replace(/<!--\s{0,20}[a-zA-Z0-9-]{0,50}\s{0,20}-->/g, '')
       res.type('html')
       res.status(200).send(_decodedSvg)
     } else if (req.body.outputFormat === 'pdf') {
@@ -314,13 +311,6 @@ app.get('/public/v8/milestone/cert/download/:certId', async (req, res) => {
   }
 })
 
-// Pre-launch browser pool at startup
-initBrowserPool().then(() => {
-  logInfo(`Browser pool ready: ${BROWSER_POOL_SIZE} browsers, ${MAX_PAGES_PER_BROWSER} pages each, ${MAX_CONCURRENT_RENDERS} total capacity`)
-}).catch((err) => {
-  logError('Failed to init browser pool:', err)
-})
-
 // Graceful shutdown
 async function shutdown() {
   logInfo('Shutting down...')
@@ -330,9 +320,44 @@ async function shutdown() {
   browserPool.length = 0
   process.exit(0)
 }
-process.on('SIGTERM', shutdown)
-process.on('SIGINT', shutdown)
 
-app.listen(port, () => {
-  return console.log(`Express is listening at http://localhost:${port}`)
-})
+// Only boot the real server (launch browsers, bind the port, hook process signals)
+// when this file is the process entry point - not when it's imported by tests.
+if (require.main === module) {
+  initBrowserPool().then(() => {
+    logInfo(`Browser pool ready: ${BROWSER_POOL_SIZE} browsers, ${MAX_PAGES_PER_BROWSER} pages each, ${MAX_CONCURRENT_RENDERS} total capacity`)
+  }).catch((err) => {
+    logError('Failed to init browser pool:', err)
+  })
+
+  setInterval(() => {
+    recycleIdleBrowsers().catch(err => logError('Recycle check failed:', err))
+  }, RECYCLE_CHECK_INTERVAL)
+
+  process.on('SIGTERM', shutdown)
+  process.on('SIGINT', shutdown)
+
+  app.listen(port, () => {
+    return console.log(`Express is listening at http://localhost:${port}`)
+  })
+}
+
+export {
+  app,
+  browserPool,
+  waitQueue,
+  createBrowserEntry,
+  initBrowserPool,
+  recycleIdleBrowsers,
+  acquirePage,
+  releasePage,
+  acquireRenderSlot,
+  releaseRenderSlot,
+  shutdown,
+  BROWSER_POOL_SIZE,
+  MAX_PAGES_PER_BROWSER,
+  MAX_CONCURRENT_RENDERS,
+  MAX_PAGES_BEFORE_RECYCLE,
+  PAGE_TIMEOUT,
+  QUEUE_TIMEOUT
+}
